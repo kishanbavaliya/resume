@@ -1,0 +1,158 @@
+name: Build APK
+
+# Builds a debug-signed release APK on every push to main, and lets you
+# trigger it manually from the Actions tab ("Run workflow").
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: 'stable'
+
+      # This project ships without android/ios folders (they're
+      # toolchain-generated) — this creates just the Android one.
+      # --project-name is required because the repo folder name has
+      # hyphens, which aren't allowed in a Dart package name — force
+      # it to match pubspec.yaml's "name: resume_maker" instead.
+      - name: Generate Android platform files
+        run: flutter create --platforms=android --org com.resumemaker --project-name resume_maker .
+
+      - name: Install required Android SDK components
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      # Rather than trying to sed-patch whatever Gradle files
+      # `flutter create` happened to generate (which kept silently not
+      # matching — root cause of the repeated failures), these three
+      # files are written from scratch with known-good, fixed content:
+      #   - AGP 8.6.0 + Gradle 8.9 (old AGP can't parse SDK 35's
+      #     android.jar → "RES_TABLE_TYPE_TYPE ... overlap" aapt2 crash)
+      #   - Kotlin Gradle plugin 1.9.24 (plugins ship newer metadata)
+      #   - compileSdk / buildToolsVersion 35 (required by
+      #     flutter_plugin_android_lifecycle et al.)
+      - name: Write known-good settings.gradle
+        run: |
+          cat > android/settings.gradle << 'EOF'
+          pluginManagement {
+              def flutterSdkPath = {
+                  def properties = new Properties()
+                  file("local.properties").withInputStream { properties.load(it) }
+                  def flutterSdkPath = properties.getProperty("flutter.sdk")
+                  assert flutterSdkPath != null, "flutter.sdk not set in local.properties"
+                  return flutterSdkPath
+              }()
+
+              includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
+
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          plugins {
+              id "dev.flutter.flutter-plugin-loader" version "1.0.0"
+              id "com.android.application" version "8.6.0" apply false
+              id "org.jetbrains.kotlin.android" version "1.9.24" apply false
+          }
+
+          include ":app"
+          EOF
+
+      - name: Write known-good gradle-wrapper.properties
+        run: |
+          cat > android/gradle/wrapper/gradle-wrapper.properties << 'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.9-all.zip
+          EOF
+
+      - name: Write known-good app/build.gradle
+        run: |
+          cat > android/app/build.gradle << 'EOF'
+          plugins {
+              id "com.android.application"
+              id "kotlin-android"
+              id "dev.flutter.flutter-gradle-plugin"
+          }
+
+          android {
+              namespace = "com.resumemaker.resume_maker"
+              compileSdk = 35
+              buildToolsVersion = "35.0.0"
+              ndkVersion = flutter.ndkVersion
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_1_8
+                  targetCompatibility = JavaVersion.VERSION_1_8
+              }
+
+              kotlinOptions {
+                  jvmTarget = "1.8"
+              }
+
+              defaultConfig {
+                  applicationId = "com.resumemaker.resume_maker"
+                  minSdk = 21
+                  targetSdk = 35
+                  versionCode = flutter.versionCode
+                  versionName = flutter.versionName
+              }
+
+              buildTypes {
+                  release {
+                      signingConfig = signingConfigs.debug
+                  }
+              }
+          }
+
+          flutter {
+              source = "../.."
+          }
+          EOF
+
+      - name: Show final Gradle config (for debugging)
+        run: |
+          echo "--- settings.gradle ---"
+          cat android/settings.gradle
+          echo "--- gradle-wrapper.properties ---"
+          cat android/gradle/wrapper/gradle-wrapper.properties
+          echo "--- app/build.gradle ---"
+          cat android/app/build.gradle
+
+      - name: Add AdMob test App ID to manifest
+        run: |
+          sed -i 's#</application>#    <meta-data android:name="com.google.android.gms.ads.APPLICATION_ID" android:value="ca-app-pub-3940256099942544~3347511713"/>\n    </application>#' android/app/src/main/AndroidManifest.xml
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: resume-maker-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
