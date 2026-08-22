@@ -36,8 +36,18 @@ jobs:
 
       - name: Install required Android SDK components
         run: |
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          SDKMANAGER="$(command -v sdkmanager || true)"
+          if [ -z "$SDKMANAGER" ] && [ -n "$ANDROID_HOME" ]; then
+            SDKMANAGER="$(find "$ANDROID_HOME" -type f -name sdkmanager 2>/dev/null | sort -r | head -n1)"
+          fi
+          if [ -n "$SDKMANAGER" ]; then
+            echo "Using sdkmanager at: $SDKMANAGER"
+            yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+            "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0" || true
+          else
+            echo "sdkmanager binary not found on this runner — skipping explicit install."
+            echo "Gradle/AGP will auto-download the required SDK components during the build instead (this is normal and worked for build-tools in earlier runs)."
+          fi
 
       # Rather than trying to sed-patch whatever Gradle files
       # `flutter create` happened to generate (which kept silently not
